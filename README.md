@@ -1,5 +1,7 @@
 # Raindear
 
+<img src="docs/screenshot.png" alt="The Raindear dropdown with volume, preset and sound sliders" width="299">
+
 A macOS menu bar app that plays rain. Made for listening on headphones while you work.
 
 The sound is generated in real time, not played from recordings, so it never loops.
