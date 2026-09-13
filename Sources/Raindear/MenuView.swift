@@ -34,7 +34,7 @@ struct MenuView: View {
     private var header: some View {
         HStack(spacing: 10) {
             VStack(alignment: .leading, spacing: 1) {
-                Text("Rain")
+                Text("Raindear")
                     .font(.headline)
                 Text(player.isPlaying ? "Playing" : "Paused")
                     .font(.caption)

@@ -1,4 +1,4 @@
-# Rain
+# Raindear
 
 A macOS menu bar app that plays rain. Made for listening on headphones while you work.
 
@@ -9,8 +9,8 @@ The sound is generated in real time, not played from recordings, so it never loo
 Needs macOS 13 or later and Xcode or the Swift toolchain (5.9+).
 
 ```sh
-make install   # builds Rain.app, copies it to /Applications and opens it
-make run       # builds build/Rain.app and opens it from there
+make install   # builds Raindear.app, copies it to /Applications and opens it
+make run       # builds build/Raindear.app and opens it from there
 ```
 
 ## Use
@@ -63,9 +63,13 @@ It prints the peak and RMS level. `make test` checks that every preset is audibl
 ## Layout
 
 ```
-Sources/Rain          menu bar app (SwiftUI MenuBarExtra, AVAudioEngine)
+Sources/Raindear      menu bar app (SwiftUI MenuBarExtra, AVAudioEngine)
 Sources/RainSynth     synthesis, settings and presets
 Sources/rain-render   offline renderer
 Tests/RainSynthTests  level and behavior tests
 Support/Info.plist    app bundle metadata
 ```
+
+## License
+
+MIT. See `LICENSE`.

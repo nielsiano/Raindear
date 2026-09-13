@@ -2,7 +2,7 @@ import AppKit
 import SwiftUI
 
 @main
-struct RainApp: App {
+struct RaindearApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
     @StateObject private var player = RainPlayer()
 

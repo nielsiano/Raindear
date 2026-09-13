@@ -2,15 +2,15 @@
 import PackageDescription
 
 let package = Package(
-    name: "Rain",
+    name: "Raindear",
     platforms: [.macOS(.v13)],
     products: [
-        .executable(name: "Rain", targets: ["Rain"]),
+        .executable(name: "Raindear", targets: ["Raindear"]),
         .executable(name: "rain-render", targets: ["rain-render"]),
     ],
     targets: [
         .target(name: "RainSynth"),
-        .executableTarget(name: "Rain", dependencies: ["RainSynth"]),
+        .executableTarget(name: "Raindear", dependencies: ["RainSynth"]),
         .executableTarget(name: "rain-render", dependencies: ["RainSynth"]),
         .testTarget(name: "RainSynthTests", dependencies: ["RainSynth"]),
     ]

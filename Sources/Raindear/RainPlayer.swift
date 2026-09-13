@@ -93,7 +93,7 @@ final class RainPlayer: ObservableObject {
         let status = SMAppService.mainApp.status
         launchAtLogin = status == .enabled
         if status == .requiresApproval {
-            errorMessage = "Allow Rain in System Settings → General → Login Items."
+            errorMessage = "Allow Raindear in System Settings → General → Login Items."
         }
     }
 
