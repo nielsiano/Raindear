@@ -19,7 +19,7 @@ install: app
 	open /Applications/Rain.app
 
 test:
-	swift test
+	swift test -c release
 
 clean:
 	rm -rf .build build

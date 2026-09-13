@@ -25,7 +25,7 @@ Click the raindrop in the menu bar. It is filled while rain is playing.
 | Drops | Close, individual drops |
 | Rumble | Low end, like heavy rain on a roof |
 | Tone | Dark and muffled to bright and open |
-| Wind | Gusts. The rain also surges with them. |
+| Wind | Gusts. The rain swells and surges with them. At 0 the rain stays steady. |
 | Thunder | How often thunder rolls in. 0 is never. The first roll comes a few seconds after you turn it up. |
 
 Settings are saved when you change them. Launch at login works best with the app installed in /Applications.
@@ -34,18 +34,21 @@ Settings are saved when you change them. Launch at login works best with the app
 
 `Sources/RainSynth` mixes five layers:
 
-- **Rain**: pink noise plus a dense patter of thousands of tiny, quiet drops per second. The patter is what makes it sound like rain instead of static. A slow random swell keeps the intensity moving.
-- **Drops**: short noise bursts through a band-pass filter, each with a random pitch, loudness and position. A few of them add the rising "plip" of a drop landing in a puddle.
+- **Rain**: filtered white noise plus a patter of hundreds to thousands of very short, quiet, unpitched ticks per second. The patter is what makes it sound like rain instead of static. The rain has a fast flutter of its own. Slower swells and bursts come with wind, so with the Wind slider at 0 the rain stays steady.
+- **Drops**: each close drop is a short broadband tick plus a softer, darker body, with a rounded attack and a random loudness and position. Drops alternate sides of center so light rain does not drift between the ears, and without wind they are spread evenly in time instead of bunching up.
 - **Rumble**: low-passed brown noise.
 - **Wind**: pink noise through a band-pass filter whose center frequency drifts with the gusts.
-- **Thunder**: brown noise with a slow attack, a long decay, a low-pass that closes over time, and random dips in level for the roll. Distant strikes are quieter, darker and slower.
+- **Thunder**: each strike is two to six claps over several seconds. Each clap opens a low-pass filter that then closes as the thunder rolls away. Distant strikes are quieter, darker and slower to build.
 
-The Tone setting is a low-pass filter on the rain and drops. For headphones, a small amount of low-passed signal from each ear is mixed into the other (crossfeed), so hard-panned sounds do not feel like they are inside one ear. Play and pause fade in and out.
+The Tone setting is a gentle low-pass on the rain and drops. The levels, spectrum and texture were tuned by comparing renders with recordings of real rain: spectrum by octave, how impulsive the sound is, and how much its loudness fluctuates at different speeds. The rain sits well below full scale so thunder can be clearly louder than it, and a limiter catches peaks at high volume.
+
+For headphones, a small amount of low-passed signal from each ear is mixed into the other (crossfeed), so hard-panned sounds do not feel like they are inside one ear. Play and pause fade in and out.
 
 ## Changing the sound
 
 - Layer levels: `Level` in `Sources/RainSynth/RainSynth.swift`
-- Synthesis details: `RainCore.updateControl` and `RainCore.spawnDrop` in the same file
+- How much the rain fluctuates: `Variation` in the same file
+- Synthesis details: `RainCore.updateControl`, `spawnPatter`, `spawnDrop` and `Thunder` in the same file
 - Presets: `Sources/RainSynth/RainSettings.swift`
 
 To hear or measure a change without the menu bar app, render to a file:
@@ -55,7 +58,7 @@ swift run -c release rain-render --preset storm --seconds 30 --out storm.wav
 swift run -c release rain-render --rain 0 --drops 0 --rumble 0 --wind 0 --thunder 1   # one layer alone
 ```
 
-It prints the peak and RMS level. `make test` checks that every preset is audible, stays below full scale and fades to silence.
+It prints the peak and RMS level. `make test` checks that every preset is audible, stays below full scale and fades to silence, and that thunder is clearly louder than the rain.
 
 ## Layout
 

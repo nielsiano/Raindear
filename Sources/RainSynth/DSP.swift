@@ -29,9 +29,15 @@ struct Random {
         low + (high - low) * unit()
     }
 
-    /// Log-uniform in [low, high), which spreads frequencies evenly by octave.
+    /// Log-uniform in [low, high), which spreads values evenly by octave.
     mutating func logRange(_ low: Float, _ high: Float) -> Float {
         low * pow(high / low, unit())
+    }
+
+    /// Standard normal (Box-Muller).
+    mutating func gaussian() -> Float {
+        let radius = (-2 * log(1 - unit())).squareRoot()
+        return radius * cos(2 * .pi * unit())
     }
 }
 
@@ -105,7 +111,7 @@ struct PinkNoise {
 }
 
 /// A smooth random signal, roughly in [-1, 1], that heads for a new random
-/// target every so often. Used for gusts, swells and thunder rolls.
+/// target every so often. Used for swells, gusts, and clusters of drops.
 struct Drift {
     private var target: Float = 0
     private var mid: Float = 0
@@ -124,16 +130,48 @@ struct Drift {
     }
 }
 
+/// Peak limiter. Reacts within about a millisecond and recovers over a
+/// quarter second, so a close thunder clap does not distort.
+struct Limiter {
+    private let threshold: Float
+    private let release: Float
+    private let attackSmoothing: Float
+    private let releaseSmoothing: Float
+    private var envelope: Float = 0
+    private var gain: Float = 1
+
+    init(threshold: Float, sampleRate: Float) {
+        self.threshold = threshold
+        release = exp(-1 / (0.25 * sampleRate))
+        attackSmoothing = smoothing(0.001, rate: sampleRate)
+        releaseSmoothing = smoothing(0.05, rate: sampleRate)
+    }
+
+    @inline(__always)
+    mutating func gain(forPeak peak: Float) -> Float {
+        envelope = max(peak, envelope * release)
+        let target = envelope > threshold ? threshold / envelope : 1
+        gain += (target - gain) * (target < gain ? attackSmoothing : releaseSmoothing)
+        return gain
+    }
+}
+
 /// One-pole smoothing coefficient for a time constant in seconds at a given update rate.
 @inline(__always)
 func smoothing(_ seconds: Float, rate: Float) -> Float {
     1 - exp(-1 / (seconds * rate))
 }
 
-/// Linear below 0.8, then a tanh knee that never exceeds 1.
+/// Coefficient for a one-pole low-pass `y += (x - y) * c` with the given cutoff.
+@inline(__always)
+func onePoleCoefficient(_ frequency: Float, sampleRate: Float) -> Float {
+    1 - exp(-2 * .pi * min(frequency, sampleRate * 0.45) / sampleRate)
+}
+
+/// Linear below 0.9, then a tanh knee that never exceeds 1.
 @inline(__always)
 func softClip(_ x: Float) -> Float {
-    let threshold: Float = 0.8
+    let threshold: Float = 0.9
     let magnitude = abs(x)
     if magnitude <= threshold { return x }
     let y = threshold + (1 - threshold) * tanh((magnitude - threshold) / (1 - threshold))

@@ -76,18 +76,32 @@ public final class RainSynth: @unchecked Sendable {
     }
 }
 
-/// Output levels for each layer at full setting. Tuned by ear and with `rain-render`.
+/// Output levels for each layer at full setting. Tuned with `rain-render`
+/// against the spectrum and texture of real rain recordings. The rain sits
+/// well below full scale so thunder has room to be louder than it.
 private enum Level {
-    static let bed: Float = 3.3
-    static let micro: Float = 0.45
-    static let drops: Float = 0.5
-    static let rumble: Float = 0.85
-    static let wind: Float = 4
+    static let bed: Float = 0.44
+    static let patter: Float = 0.3
+    static let drops: Float = 0.24
+    static let rumble: Float = 0.28
+    static let wind: Float = 2.5
     static let thunder: Float = 2
 }
 
+/// How much the rain intensity wanders. Swells, gusts and bursts come from
+/// wind, so without wind they almost vanish and the rain stays steady.
+/// Flutter is fast enough to be heard as texture rather than movement.
+private enum Variation {
+    static let calmSwell: Float = 0.03
+    static let windySwell: Float = 0.25
+    static let windyGust: Float = 0.6
+    static let calmCluster: Float = 0.04
+    static let windyCluster: Float = 0.15
+    static let flutter: Float = 0.4
+}
+
 struct RainCore {
-    static let voiceCount = 96
+    static let voiceCount = 256
     /// Filters and modulation update every this many samples.
     static let controlInterval = 64
     /// How much of each ear's signal leaks into the other.
@@ -98,7 +112,6 @@ struct RainCore {
 
     private let sampleRate: Float
     private let controlRate: Float
-    private let voices: UnsafeMutablePointer<DropVoice>
     private var rng: Random
     private var controlCountdown = 0
 
@@ -107,6 +120,8 @@ struct RainCore {
     private let toneSmoothing: Float
     private let swellSmoothing: Float
     private let gustSmoothing: Float
+    private let clusterSmoothing: Float
+    private let flutterSmoothing: Float
     private let sweepSmoothing: Float
     private let crossfeedSmoothing: Float
 
@@ -124,28 +139,35 @@ struct RainCore {
     private var tone: Float = 0.5
     private var swellDrift = Drift()
     private var gustDrift = Drift()
+    private var clusterDrift = Drift()
+    private var flutterDrift = Drift()
     private var sweepDriftL = Drift()
     private var sweepDriftR = Drift()
 
-    // Rain bus: hiss and drops, then the tone filter.
-    private var bedPinkL = PinkNoise()
-    private var bedPinkR = PinkNoise()
-    private var bedHighpass = BiquadCoefficients()
-    private var bedHighpassL = BiquadState()
-    private var bedHighpassR = BiquadState()
-    // Two biquads with these Qs make a flat 4th-order Butterworth low-pass.
-    private var toneFilterA = BiquadCoefficients()
-    private var toneFilterB = BiquadCoefficients()
-    private var toneL1 = BiquadState()
-    private var toneL2 = BiquadState()
-    private var toneR1 = BiquadState()
-    private var toneR2 = BiquadState()
+    // Rain bus: the floor and drops, then the tone filter.
+    private let bedHighpass: Float
+    private var bedLowL: Float = 0
+    private var bedLowR: Float = 0
+    private var toneCoefficient1: Float = 1
+    private var toneCoefficient2: Float = 1
+    private var toneL1: Float = 0
+    private var toneL2: Float = 0
+    private var toneR1: Float = 0
+    private var toneR2: Float = 0
 
-    // Drops.
-    private var nextVoice = 0
-    private var microChance: Float = 0
-    private var microLevel: Float = 0
-    private var dropChance: Float = 0
+    // Drops. Active voices are packed at the front of `voices`.
+    private let voices: UnsafeMutablePointer<DropVoice>
+    private var activeVoices = 0
+    private var stealIndex = 0
+    private var patterChance: Float = 0
+    private var patterLevel: Float = 0
+    /// Close drops per sample, and how far until the next one, in units of
+    /// the average gap.
+    private var dropRate: Float = 0
+    private var dropCountdown: Float = 1
+    private var dropIrregularity: Float = 0
+    /// Alternates which side of center the next drop lands on.
+    private var nextDropOnLeft = false
 
     // Rumble.
     private var brownL: Float = 0
@@ -165,14 +187,15 @@ struct RainCore {
     private var windStateL = BiquadState()
     private var windStateR = BiquadState()
 
-    // Headphone crossfeed.
-    private var crossL: Float = 0
-    private var crossR: Float = 0
-
     // Thunder.
-    private var thunder = Thunder()
+    private var thunder: Thunder
     private var thunderEnabled = false
     private var thunderCountdown = 0
+
+    // Output.
+    private var crossL: Float = 0
+    private var crossR: Float = 0
+    private var limiter: Limiter
 
     init(sampleRate: Float, seed: UInt64, voices: UnsafeMutablePointer<DropVoice>) {
         self.sampleRate = sampleRate
@@ -184,9 +207,15 @@ struct RainCore {
         toneSmoothing = smoothing(0.08, rate: controlRate)
         swellSmoothing = smoothing(2.5, rate: controlRate)
         gustSmoothing = smoothing(0.7, rate: controlRate)
+        clusterSmoothing = smoothing(0.08, rate: controlRate)
+        flutterSmoothing = smoothing(0.015, rate: controlRate)
         sweepSmoothing = smoothing(1.5, rate: controlRate)
-        crossfeedSmoothing = smoothing(1 / (2 * .pi * 700), rate: sampleRate)
+        crossfeedSmoothing = onePoleCoefficient(700, sampleRate: sampleRate)
+        // Recordings of rain fall off about 7 dB per octave below 1 kHz.
+        bedHighpass = onePoleCoefficient(600, sampleRate: sampleRate)
         rumbleHighpass = .highpass(40, q: 0.7, sampleRate: sampleRate)
+        thunder = Thunder(sampleRate: sampleRate)
+        limiter = Limiter(threshold: 0.8, sampleRate: sampleRate)
     }
 
     mutating func render(left: UnsafeMutablePointer<Float>, right: UnsafeMutablePointer<Float>, frameCount: Int) {
@@ -202,18 +231,39 @@ struct RainCore {
             rumbleGain += (rumbleTarget - rumbleGain) * gainSmoothing
             windGain += (windTarget - windGain) * gainSmoothing
 
-            if rng.unit() < microChance { spawnDrop(close: false) }
-            if rng.unit() < dropChance { spawnDrop(close: true) }
+            if rng.unit() < patterChance { spawnPatter() }
+            if dropRate > 0 {
+                dropCountdown -= dropRate
+                if dropCountdown <= 0 {
+                    spawnDrop()
+                    dropCountdown += nextDropGap()
+                }
+            }
 
-            var rainL = bedHighpassL.process(bedPinkL.process(rng.bipolar()), bedHighpass) * bedGain
-            var rainR = bedHighpassR.process(bedPinkR.process(rng.bipolar()), bedHighpass) * bedGain
-            for index in 0..<Self.voiceCount where voices[index].active {
-                let sample = voices[index].process(&rng)
+            let whiteL = rng.bipolar()
+            let whiteR = rng.bipolar()
+            bedLowL += (whiteL - bedLowL) * bedHighpass
+            bedLowR += (whiteR - bedLowR) * bedHighpass
+            var rainL = (whiteL - bedLowL) * bedGain
+            var rainR = (whiteR - bedLowR) * bedGain
+
+            var index = 0
+            while index < activeVoices {
+                let sample = voices[index].process(rng.bipolar())
                 rainL += sample * voices[index].gainL
                 rainR += sample * voices[index].gainR
+                if voices[index].isFinished {
+                    activeVoices -= 1
+                    voices[index] = voices[activeVoices]
+                } else {
+                    index += 1
+                }
             }
-            rainL = toneL2.process(toneL1.process(rainL, toneFilterA), toneFilterB)
-            rainR = toneR2.process(toneR1.process(rainR, toneFilterA), toneFilterB)
+
+            toneL1 += (rainL - toneL1) * toneCoefficient1
+            toneL2 += (toneL1 - toneL2) * toneCoefficient2
+            toneR1 += (rainR - toneR1) * toneCoefficient1
+            toneR2 += (toneR1 - toneR2) * toneCoefficient2
 
             brownL = brownL * 0.995 + rng.bipolar() * 0.07
             brownR = brownR * 0.995 + rng.bipolar() * 0.07
@@ -225,16 +275,19 @@ struct RainCore {
 
             let (thunderL, thunderR) = thunder.process(&rng)
 
-            let dryL = rainL + rumbleL + windL + thunderL
-            let dryR = rainR + rumbleR + windR + thunderR
+            let dryL = toneL2 + rumbleL + windL + thunderL
+            let dryR = toneR2 + rumbleR + windR + thunderR
             // On headphones, fully separated channels sound like they are inside
             // your head. Feed a little low-passed signal from the other ear, as
             // happens naturally with sound in a room.
             crossL += (dryR - crossL) * crossfeedSmoothing
             crossR += (dryL - crossR) * crossfeedSmoothing
 
-            left[i] = softClip((dryL + Self.crossfeed * crossL) * master)
-            right[i] = softClip((dryR + Self.crossfeed * crossR) * master)
+            let outL = (dryL + Self.crossfeed * crossL) * master
+            let outR = (dryR + Self.crossfeed * crossR) * master
+            let gain = limiter.gain(forPeak: max(abs(outL), abs(outR)))
+            left[i] = softClip(outL * gain)
+            right[i] = softClip(outR * gain)
         }
     }
 
@@ -249,24 +302,35 @@ struct RainCore {
         masterTarget = playing ? volume * volume : 0
         tone += (unitValue(settings.tone) - tone) * toneSmoothing
 
+        // Rain flutters on its own. With wind it also swells over seconds,
+        // surges with gusts, and comes in bursts of heavier drops.
         let swell = swellDrift.tick(&rng, minTicks: ticks(6), maxTicks: ticks(14), coefficient: swellSmoothing)
         let gust = gustDrift.tick(&rng, minTicks: ticks(1.5), maxTicks: ticks(5), coefficient: gustSmoothing)
-        // Rain gets heavier and lighter on its own, and surges with the wind.
-        let surge = max(0.2, 1 + 0.12 * swell + (0.05 + 0.45 * wind) * gust)
+        let cluster = clusterDrift.tick(&rng, minTicks: ticks(0.15), maxTicks: ticks(0.7), coefficient: clusterSmoothing)
+        let flutter = flutterDrift.tick(&rng, minTicks: ticks(0.03), maxTicks: ticks(0.12), coefficient: flutterSmoothing)
+        let surge = exp(
+            (Variation.calmSwell + Variation.windySwell * wind) * swell
+                + Variation.windyGust * wind * gust
+                + (Variation.calmCluster + Variation.windyCluster * wind) * cluster
+                + Variation.flutter * flutter
+        )
 
         let rainCurve = pow(rain, 1.3)
         bedTarget = rainCurve * Level.bed * surge
-        microLevel = rainCurve * Level.micro * surge
-        microChance = rain > 0 ? (200 + 1800 * rain) * surge / sampleRate : 0
-        dropChance = pow(drops, 1.6) * 250 * surge / sampleRate
-        rumbleTarget = pow(rumble, 1.3) * Level.rumble * surge
+        patterLevel = rainCurve * Level.patter
+        // Bursts bring more drops, not just louder ones.
+        patterChance = rain > 0 ? min((120 + 1400 * rain) * surge * surge / sampleRate, 0.5) : 0
+        dropRate = drops > 0 ? (2 + 100 * drops * drops) * surge / sampleRate : 0
+        dropIrregularity = wind
+        rumbleTarget = pow(rumble, 1.3) * Level.rumble * surge.squareRoot()
         let gustShape = 0.5 + 0.5 * gust
         windTarget = pow(wind, 1.3) * Level.wind * (0.2 + 1.5 * gustShape * gustShape)
 
-        let toneCutoff = 900 * pow(20, tone)
-        toneFilterA = .lowpass(toneCutoff, q: 0.5412, sampleRate: sampleRate)
-        toneFilterB = .lowpass(toneCutoff, q: 1.3066, sampleRate: sampleRate)
-        bedHighpass = .highpass(140 + 260 * tone, q: 0.6, sampleRate: sampleRate)
+        // Gentle two-pole roll-off: about -8 dB at 8 kHz in the middle of the range,
+        // like a recording, instead of a hard ceiling.
+        let toneCutoff = 1200 * pow(12, tone)
+        toneCoefficient1 = onePoleCoefficient(toneCutoff, sampleRate: sampleRate)
+        toneCoefficient2 = onePoleCoefficient(toneCutoff * 2.5, sampleRate: sampleRate)
         rumbleLowpass = .lowpass(220 + 200 * tone, q: 0.7, sampleRate: sampleRate)
 
         let sweepL = sweepDriftL.tick(&rng, minTicks: ticks(3), maxTicks: ticks(8), coefficient: sweepSmoothing)
@@ -275,76 +339,106 @@ struct RainCore {
         windBandR = .bandpass(350 * pow(2, 1.3 * sweepR + 0.5 * gust), q: 1.2, sampleRate: sampleRate)
 
         scheduleThunder(thunderAmount)
-        thunder.updateControl(&rng, controlRate: controlRate, sampleRate: sampleRate)
+        thunder.updateControl(&rng, interval: Self.controlInterval, controlRate: controlRate, sampleRate: sampleRate)
     }
 
     private mutating func scheduleThunder(_ amount: Float) {
         let enabled = amount > 0
         if enabled && !thunderEnabled {
-            // Turning thunder on should be audible soon, not in two minutes.
-            thunderCountdown = Int(rng.range(3, 8) * sampleRate)
+            // Turning thunder on should be audible soon, not in a minute.
+            thunderCountdown = Int(rng.range(2, 5) * sampleRate)
         }
         thunderEnabled = enabled
         guard enabled else { return }
 
         thunderCountdown -= Self.controlInterval
         if thunderCountdown <= 0 {
-            thunder.strike(loudness: Level.thunder * (0.7 + 0.3 * amount), rng: &rng, sampleRate: sampleRate)
-            let meanGap = 120 - 100 * amount
-            let gap = max(8, -log(max(rng.unit(), 0.0001)) * meanGap)
+            thunder.strike(strength: Level.thunder * (0.75 + 0.25 * amount), rng: &rng, sampleRate: sampleRate)
+            let meanGap = 90 - 78 * amount
+            let gap = max(6, -log(max(rng.unit(), 0.0001)) * meanGap)
             thunderCountdown = Int(gap * sampleRate)
         }
     }
 
-    /// Close drops are sparse, louder and varied. Distant ones are the dense,
-    /// quiet patter that makes the hiss sound like rain instead of static.
-    private mutating func spawnDrop(close: Bool) {
-        var voice = DropVoice()
-        let frequency: Float
-        let q: Float
-        let burstTime: Float
-        let level: Float
-        let width: Float
+    /// Distant drops: hundreds to thousands of quiet, very short, unpitched ticks
+    /// per second. Together they make the floor sound like rain instead of static.
+    private mutating func spawnPatter() {
+        addVoice(DropVoice(
+            attackTime: rng.range(0.00005, 0.0003),
+            decayTime: rng.logRange(0.0004, 0.003),
+            highpass: rng.logRange(700, 2500),
+            lowpass: rng.logRange(2000, 12000),
+            amplitude: patterLevel * loudness(spread: 0.5, limit: 2.5),
+            pan: nextPan(width: 0.9),
+            sampleRate: sampleRate
+        ))
+    }
 
-        if close {
-            let loudness = pow(rng.unit(), 2)
-            level = Level.drops * (0.2 + 0.8 * loudness)
-            frequency = rng.logRange(600, 4000) * (0.7 + 0.6 * tone)
-            q = rng.range(1.5, 5)
-            burstTime = rng.range(0.0012, 0.004)
-            // A loud drop right at one ear is distracting on headphones.
-            width = 0.6
-            if rng.unit() < 0.05 {
-                // A drop landing in a puddle: a short sine that glides upward.
-                voice.bubbleAmplitude = 0.3 * (0.3 + 0.7 * loudness)
-                voice.bubbleStep = rng.range(900, 2400) / sampleRate
-                voice.bubbleGlide = pow(1.8, 1 / (0.04 * sampleRate))
-                voice.bubbleDecay = exp(-1 / (rng.range(0.012, 0.03) * sampleRate))
-            }
+    /// Close drops: a short tick plus a softer, darker body, like a drop
+    /// landing on a leaf or the ground nearby.
+    private mutating func spawnDrop() {
+        let amplitude = Level.drops * loudness(spread: 0.55, limit: 2.5)
+        // A loud drop right at one ear is distracting on headphones.
+        let pan = nextPan(width: 0.6)
+        addVoice(DropVoice(
+            attackTime: rng.range(0.0001, 0.0004),
+            decayTime: rng.logRange(0.0008, 0.004),
+            highpass: rng.logRange(200, 1000),
+            lowpass: rng.logRange(2000, 8000),
+            amplitude: amplitude,
+            pan: pan,
+            sampleRate: sampleRate
+        ))
+        addVoice(DropVoice(
+            attackTime: rng.range(0.0015, 0.004),
+            decayTime: rng.logRange(0.008, 0.03),
+            highpass: rng.logRange(90, 250),
+            lowpass: rng.logRange(500, 2200),
+            amplitude: amplitude * rng.range(0.2, 0.5),
+            // Low sounds are hard to place anyway, and moving them around
+            // makes the rain seem to drift between the ears.
+            pan: 0.5 + (pan - 0.5) * 0.4,
+            sampleRate: sampleRate
+        ))
+    }
+
+    /// Gap to the next close drop, as a multiple of the average gap. Without
+    /// wind, drops are spread fairly evenly so they do not bunch up and leave
+    /// holes. Gusts shake drops loose in bursts, so wind makes the timing
+    /// fully random.
+    private mutating func nextDropGap() -> Float {
+        let even = rng.range(0.4, 1.6)
+        let random = -log(max(rng.unit(), 0.0001))
+        return even + (random - even) * dropIrregularity
+    }
+
+    /// A random position that alternates sides of center. Each drop still
+    /// lands somewhere different, but neither ear gets more drops than the
+    /// other for long, so light rain does not drift from side to side.
+    private mutating func nextPan(width: Float) -> Float {
+        nextDropOnLeft.toggle()
+        let offset = rng.unit() * width / 2
+        return nextDropOnLeft ? 0.5 - offset : 0.5 + offset
+    }
+
+    /// Random loudness around 1: most drops are similar, a few are louder,
+    /// and none is so loud that it jumps out.
+    private mutating func loudness(spread: Float, limit: Float) -> Float {
+        min(exp(spread * rng.gaussian()), limit)
+    }
+
+    private mutating func addVoice(_ voice: DropVoice) {
+        if activeVoices < Self.voiceCount {
+            voices[activeVoices] = voice
+            activeVoices += 1
         } else {
-            level = microLevel * (0.15 + 0.85 * pow(rng.unit(), 3))
-            frequency = rng.logRange(1500, 7000) * (0.7 + 0.6 * tone)
-            q = rng.range(0.8, 2.5)
-            burstTime = rng.range(0.0003, 0.0015)
-            width = 0.85
+            voices[stealIndex] = voice
+            stealIndex = (stealIndex + 1) % Self.voiceCount
         }
-
-        voice.active = true
-        voice.filter = .bandpass(frequency, q: q, sampleRate: sampleRate)
-        // A narrow band-pass removes most of the noise energy; make it up.
-        voice.drive = min((sampleRate * q / (.pi * frequency)).squareRoot(), 8)
-        voice.burst = 1
-        voice.burstDecay = exp(-1 / (burstTime * sampleRate))
-        let pan = (0.5 + width * (rng.unit() - 0.5)) * .pi / 2
-        voice.gainL = cos(pan) * level
-        voice.gainR = sin(pan) * level
-
-        voices[nextVoice] = voice
-        nextVoice = (nextVoice + 1) % Self.voiceCount
     }
 
     private func ticks(_ seconds: Float) -> Int {
-        Int(seconds * controlRate)
+        max(1, Int(seconds * controlRate))
     }
 
     private func unitValue(_ value: Double) -> Float {
@@ -352,109 +446,197 @@ struct RainCore {
     }
 }
 
+/// One drop: filtered noise shaped by an envelope with a rounded attack.
 struct DropVoice {
-    var active = false
-    var gainL: Float = 0
-    var gainR: Float = 0
-    var filter = BiquadCoefficients()
-    var drive: Float = 1
-    var burst: Float = 0
-    var burstDecay: Float = 0
-    var bubbleAmplitude: Float = 0
-    var bubbleDecay: Float = 0
-    var bubblePhase: Float = 0
-    var bubbleStep: Float = 0
-    var bubbleGlide: Float = 1
-    private var state = BiquadState()
+    private(set) var gainL: Float = 0
+    private(set) var gainR: Float = 0
+    private var amplitude: Float = 0
+    private var attack: Float = 1
+    private var decay: Float = 0
+    private var attackMultiplier: Float = 0
+    private var decayMultiplier: Float = 0
+    private var highpassCoefficient: Float = 0
+    private var lowpassCoefficient: Float = 1
+    private var highpassState: Float = 0
+    private var lowpassState1: Float = 0
+    private var lowpassState2: Float = 0
+
+    init() {}
+
+    init(
+        attackTime: Float,
+        decayTime: Float,
+        highpass: Float,
+        lowpass: Float,
+        amplitude: Float,
+        pan: Float,
+        sampleRate: Float
+    ) {
+        let attackSamples = max(attackTime * sampleRate, 0.5)
+        let decaySamples = max(decayTime * sampleRate, attackSamples * 2.5)
+        attackMultiplier = exp(-1 / attackSamples)
+        decayMultiplier = exp(-1 / decaySamples)
+        attack = 1
+        decay = 1
+
+        // The envelope is decay minus attack, which starts at zero and rises
+        // smoothly. Scale it so it peaks at 1.
+        let peakTime = attackSamples * decaySamples / (decaySamples - attackSamples) * log(decaySamples / attackSamples)
+        let envelopePeak = exp(-peakTime / decaySamples) - exp(-peakTime / attackSamples)
+
+        highpassCoefficient = onePoleCoefficient(highpass, sampleRate: sampleRate)
+        lowpassCoefficient = onePoleCoefficient(lowpass, sampleRate: sampleRate)
+        // Two one-pole low-passes remove noise power. Put it back, so a dark
+        // drop is not automatically a quiet one.
+        let c = lowpassCoefficient
+        let r2 = (1 - c) * (1 - c)
+        let noisePower = c * c * c * c * (1 + r2) / pow(1 - r2, 3)
+
+        self.amplitude = amplitude / (envelopePeak * noisePower.squareRoot())
+        gainL = cos(pan * .pi / 2)
+        gainR = sin(pan * .pi / 2)
+    }
+
+    var isFinished: Bool {
+        decay < 0.003
+    }
 
     @inline(__always)
-    mutating func process(_ rng: inout Random) -> Float {
-        var output = state.process(rng.bipolar() * burst * drive, filter)
-        burst *= burstDecay
-        if bubbleAmplitude > 0.0001 {
-            output += sin(2 * .pi * bubblePhase) * bubbleAmplitude
-            bubblePhase += bubbleStep
-            if bubblePhase >= 1 { bubblePhase -= 1 }
-            bubbleStep *= bubbleGlide
-            bubbleAmplitude *= bubbleDecay
-        }
-        if burst < 0.001 && bubbleAmplitude <= 0.0001 {
-            active = false
-        }
-        return output
+    mutating func process(_ white: Float) -> Float {
+        highpassState += (white - highpassState) * highpassCoefficient
+        lowpassState1 += (white - highpassState - lowpassState1) * lowpassCoefficient
+        lowpassState2 += (lowpassState1 - lowpassState2) * lowpassCoefficient
+        attack *= attackMultiplier
+        decay *= decayMultiplier
+        return lowpassState2 * (decay - attack) * amplitude
     }
 }
 
-/// One thunder voice. A new strike picks up from the current envelope, so
-/// overlapping strikes do not click.
+/// Thunder: a strike is a few claps over several seconds that pile onto one
+/// envelope, with a low-pass that opens on each clap and closes as it rolls
+/// away. Distant strikes are quieter, darker and slower to build.
 struct Thunder {
+    private static let bodyGain: Float = 4
+    private static let rumbleGain: Float = 0.35
+
     private var active = false
-    private var attacking = false
+    private var distance: Float = 0
+    private var strength: Float = 0
+    private var clapIndex = 0
+    private var clapCount = 0
+    private var clapCountdown = 0
     private var envelope: Float = 0
-    private var peak: Float = 0
-    private var attackCoefficient: Float = 0
-    private var decayCoefficient: Float = 0
-    private var crackle: Float = 0
-    private var crackleDecay: Float = 0
+    private var target: Float = 0
+    private var attackSmoothing: Float = 0
+    private var attackSamplesLeft = 0
+    private var decayMultiplier: Float = 1
+    private var cutoff: Float = 400
+    private var cutoffFloor: Float = 400
+    private var bodyCoefficient: Float = 0
+    private var body1: Float = 0
+    private var body2: Float = 0
+    private var pink = PinkNoise()
     private var brown: Float = 0
-    private var cutoff: Float = 200
-    private var lowpass = BiquadCoefficients()
-    private var highpass = BiquadCoefficients()
-    private var lowpassA = BiquadState()
-    private var lowpassB = BiquadState()
+    private var rumble1: Float = 0
+    private var rumble2: Float = 0
+    private let rumbleCoefficient: Float
+    private var crackle: Float = 0
+    private var crackleMultiplier: Float = 0
+    private var crackleState: Float = 0
+    private let crackleCoefficient: Float
+    private let highpass: BiquadCoefficients
     private var highpassState = BiquadState()
-    private var rollDrift = Drift()
-    private var roll: Float = 1
+    private let bodyHighpass: BiquadCoefficients
+    private var bodyHighpassState = BiquadState()
+    private var textureDrift = Drift()
+    private var texture: Float = 1
     private var gainL: Float = 0
     private var gainR: Float = 0
 
-    mutating func strike(loudness: Float, rng: inout Random, sampleRate: Float) {
-        // Far-away thunder is quieter, darker, and swells in slowly.
-        let distance = rng.unit()
-        active = true
-        attacking = true
-        peak = loudness * (1 - 0.6 * distance)
-        // Even close strikes take a moment to build, so they do not startle.
-        attackCoefficient = smoothing(0.06 + 0.5 * distance, rate: sampleRate)
-        decayCoefficient = exp(-1 / ((rng.range(1.5, 3.5) + 2 * distance) * sampleRate))
-        crackle = (1 - distance) * (1 - distance) * 1.5
-        crackleDecay = exp(-1 / (0.3 * sampleRate))
-        cutoff = 1800 - 1200 * distance
-        highpass = .highpass(35, q: 0.7, sampleRate: sampleRate)
-        let pan = (0.25 + 0.5 * rng.unit()) * .pi / 2
-        gainL = cos(pan)
-        gainR = sin(pan)
+    init(sampleRate: Float) {
+        rumbleCoefficient = onePoleCoefficient(120, sampleRate: sampleRate)
+        crackleCoefficient = onePoleCoefficient(3500, sampleRate: sampleRate)
+        highpass = .highpass(45, q: 0.7, sampleRate: sampleRate)
+        // Sub-bass uses up headroom without making thunder sound louder,
+        // so most of it comes from the separate, quieter rumble.
+        bodyHighpass = .highpass(150, q: 0.7, sampleRate: sampleRate)
     }
 
-    mutating func updateControl(_ rng: inout Random, controlRate: Float, sampleRate: Float) {
+    mutating func strike(strength: Float, rng: inout Random, sampleRate: Float) {
+        distance = rng.unit()
+        self.strength = strength * (1 - 0.4 * distance)
+        clapIndex = 0
+        clapCount = 2 + Int(rng.unit() * 5)
+        clapCountdown = 0
+        // Keep most of the energy where ears are sensitive at low volume.
+        cutoffFloor = 750 - 400 * distance
+        if distance < 0.35 {
+            // Close strikes start with a crack.
+            crackle = self.strength * (0.35 - distance) * 3
+            crackleMultiplier = exp(-1 / (rng.range(0.05, 0.15) * sampleRate))
+        }
+        let pan = rng.range(0.2, 0.8) * .pi / 2
+        gainL = cos(pan)
+        gainR = sin(pan)
+        active = true
+    }
+
+    mutating func updateControl(_ rng: inout Random, interval: Int, controlRate: Float, sampleRate: Float) {
         guard active else { return }
-        cutoff += (120 - cutoff) * smoothing(1, rate: controlRate)
-        lowpass = .lowpass(cutoff, q: 0.7, sampleRate: sampleRate)
-        let value = rollDrift.tick(
+        if clapIndex < clapCount {
+            clapCountdown -= interval
+            if clapCountdown <= 0 {
+                clap(&rng, sampleRate: sampleRate)
+            }
+        } else if envelope < 0.0005 && attackSamplesLeft <= 0 {
+            active = false
+            return
+        }
+        cutoff += (cutoffFloor - cutoff) * smoothing(0.7, rate: controlRate)
+        bodyCoefficient = onePoleCoefficient(cutoff, sampleRate: sampleRate)
+        let value = textureDrift.tick(
             &rng,
-            minTicks: Int(0.12 * controlRate),
-            maxTicks: Int(0.6 * controlRate),
-            coefficient: smoothing(0.06, rate: controlRate)
+            minTicks: Int(0.02 * controlRate),
+            maxTicks: Int(0.12 * controlRate),
+            coefficient: smoothing(0.02, rate: controlRate)
         )
-        roll = max(0.15, 0.6 + 0.7 * value)
+        texture = 0.8 + 0.35 * value
+    }
+
+    private mutating func clap(_ rng: inout Random, sampleRate: Float) {
+        let fade = pow(0.8, Float(clapIndex))
+        let loudness = strength * rng.range(0.5, 1) * fade
+        target = min(envelope + loudness, strength * 1.2)
+        let attackTime = (0.03 + 0.3 * distance) * rng.range(0.6, 1.4)
+        attackSmoothing = smoothing(attackTime, rate: sampleRate)
+        attackSamplesLeft = Int(attackTime * 3 * sampleRate)
+        decayMultiplier = exp(-1 / (rng.range(0.9, 2.2) * sampleRate))
+        cutoff = max(cutoff, (3500 - 2300 * distance) * rng.range(0.6, 1) * fade)
+        clapIndex += 1
+        clapCountdown = Int(rng.range(0.25, 1.4) * sampleRate)
     }
 
     @inline(__always)
     mutating func process(_ rng: inout Random) -> (Float, Float) {
         guard active else { return (0, 0) }
-        if attacking {
-            envelope += (peak * 1.05 - envelope) * attackCoefficient
-            if envelope >= peak { attacking = false }
+        if attackSamplesLeft > 0 {
+            envelope += (target - envelope) * attackSmoothing
+            attackSamplesLeft -= 1
         } else {
-            envelope *= decayCoefficient
-            if envelope < 0.0005 { active = false }
+            envelope *= decayMultiplier
         }
         let white = rng.bipolar()
-        brown = brown * 0.997 + white * 0.08
-        let excitation = brown + white * crackle
-        crackle *= crackleDecay
-        let filtered = lowpassB.process(lowpassA.process(excitation, lowpass), lowpass)
-        let output = highpassState.process(filtered, highpass) * envelope * roll
+        let pinkNoise = bodyHighpassState.process(pink.process(white), bodyHighpass)
+        body1 += (pinkNoise - body1) * bodyCoefficient
+        body2 += (body1 - body2) * bodyCoefficient
+        brown = brown * 0.998 + white * 0.05
+        rumble1 += (brown - rumble1) * rumbleCoefficient
+        rumble2 += (rumble1 - rumble2) * rumbleCoefficient
+        crackleState += (white * crackle - crackleState) * crackleCoefficient
+        crackle *= crackleMultiplier
+
+        let low = highpassState.process(body2 * Self.bodyGain + rumble2 * Self.rumbleGain, highpass)
+        let output = low * envelope * texture + crackleState
         return (output * gainL, output * gainR)
     }
 }

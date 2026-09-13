@@ -68,12 +68,12 @@ public struct RainPreset: Identifiable, Sendable {
         all.first { $0.matches(settings) }
     }
 
-    public static let drizzle = RainPreset(id: "drizzle", name: "Drizzle", rain: 0.3, drops: 0.3, rumble: 0.05, tone: 0.6, wind: 0.05, thunder: 0)
-    public static let steady = RainPreset(id: "steady", name: "Steady rain", rain: 0.55, drops: 0.4, rumble: 0.25, tone: 0.55, wind: 0.1, thunder: 0)
-    public static let downpour = RainPreset(id: "downpour", name: "Downpour", rain: 0.9, drops: 0.55, rumble: 0.55, tone: 0.5, wind: 0.3, thunder: 0)
+    public static let drizzle = RainPreset(id: "drizzle", name: "Drizzle", rain: 0.3, drops: 0.22, rumble: 0.05, tone: 0.5, wind: 0.05, thunder: 0)
+    public static let steady = RainPreset(id: "steady", name: "Steady rain", rain: 0.55, drops: 0.4, rumble: 0.15, tone: 0.35, wind: 0.1, thunder: 0)
+    public static let downpour = RainPreset(id: "downpour", name: "Downpour", rain: 0.9, drops: 0.55, rumble: 0.55, tone: 0.42, wind: 0.3, thunder: 0)
     public static let roof = RainPreset(id: "roof", name: "Rain on a roof", rain: 0.6, drops: 0.7, rumble: 0.7, tone: 0.3, wind: 0.05, thunder: 0)
     public static let window = RainPreset(id: "window", name: "Behind a window", rain: 0.5, drops: 0.15, rumble: 0.35, tone: 0.1, wind: 0.15, thunder: 0)
-    public static let storm = RainPreset(id: "storm", name: "Thunderstorm", rain: 0.8, drops: 0.45, rumble: 0.5, tone: 0.45, wind: 0.45, thunder: 0.6)
+    public static let storm = RainPreset(id: "storm", name: "Thunderstorm", rain: 0.5, drops: 0.35, rumble: 0.25, tone: 0.4, wind: 0.45, thunder: 0.7)
 
     public static let all: [RainPreset] = [drizzle, steady, downpour, roof, window, storm]
 }
