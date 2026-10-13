@@ -1,6 +1,9 @@
 APP := build/Raindear.app
+# A swift.org toolchain with the Swift SDK for WebAssembly installed. Xcode's swift cannot target wasm
+SWIFT_WASM ?= swift
+WASM_SDK ?= swift-6.4.0-RELEASE_wasm-embedded
 
-.PHONY: app run install test clean
+.PHONY: app run install test wasm clean
 
 app:
 	swift build -c release --product Raindear
@@ -21,5 +24,9 @@ install: app
 test:
 	swift test -c release
 
+wasm:
+	$(SWIFT_WASM) build -c release --product rain-wasm --swift-sdk $(WASM_SDK) --scratch-path .build-wasm
+	cp .build-wasm/release/rain-wasm.wasm web/rain.wasm
+
 clean:
-	rm -rf .build build
+	rm -rf .build .build-wasm build web/rain.wasm

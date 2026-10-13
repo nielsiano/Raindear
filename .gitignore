@@ -3,3 +3,5 @@
 .swiftpm/
 build/
 *.wav
+.build-wasm/
+web/rain.wasm

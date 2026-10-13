@@ -1,7 +1,5 @@
-import Foundation
-
 /// Everything the listener can change. All values are 0...1.
-public struct RainSettings: Codable, Equatable, Sendable {
+public struct RainSettings: Equatable, Sendable {
     /// Output level.
     public var volume: Double
     /// Density and loudness of the steady rain wash.
@@ -37,6 +35,10 @@ public struct RainSettings: Codable, Equatable, Sendable {
 
     public static let `default` = RainPreset.steady.apply(to: RainSettings())
 }
+
+#if !hasFeature(Embedded)
+extension RainSettings: Codable {}
+#endif
 
 public struct RainPreset: Identifiable, Sendable {
     public let id: String

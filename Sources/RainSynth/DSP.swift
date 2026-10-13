@@ -1,4 +1,8 @@
+#if os(WASI)
+import WASILibc
+#else
 import Foundation
+#endif
 
 /// xorshift64* generator. Fast and allocation-free, so it is safe on the audio thread.
 struct Random {

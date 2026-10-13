@@ -1,5 +1,11 @@
+#if os(WASI)
+import WASILibc
+#else
 import Foundation
+#endif
+#if canImport(os)
 import os
+#endif
 
 /// Procedural rain generator.
 ///
@@ -12,9 +18,11 @@ public final class RainSynth: @unchecked Sendable {
 
     private let core: UnsafeMutablePointer<RainCore>
     private let voices: UnsafeMutablePointer<DropVoice>
+    #if canImport(os)
     private let lock: UnsafeMutablePointer<os_unfair_lock_s>
+    #endif
 
-    // Guarded by `lock`.
+    // Guarded by `lock`. Without `os` (WebAssembly) there is one thread and no lock.
     private var pendingSettings: RainSettings
     private var pendingPlaying: Bool
     private var hasPending = true
@@ -33,8 +41,10 @@ public final class RainSynth: @unchecked Sendable {
         voices.initialize(repeating: DropVoice(), count: RainCore.voiceCount)
         core = .allocate(capacity: 1)
         core.initialize(to: RainCore(sampleRate: Float(sampleRate), seed: seed, voices: voices))
+        #if canImport(os)
         lock = .allocate(capacity: 1)
         lock.initialize(to: os_unfair_lock_s())
+        #endif
     }
 
     deinit {
@@ -42,37 +52,51 @@ public final class RainSynth: @unchecked Sendable {
         core.deallocate()
         voices.deinitialize(count: RainCore.voiceCount)
         voices.deallocate()
+        #if canImport(os)
         lock.deinitialize(count: 1)
         lock.deallocate()
+        #endif
     }
 
     public func setSettings(_ settings: RainSettings) {
+        #if canImport(os)
         os_unfair_lock_lock(lock)
+        defer { os_unfair_lock_unlock(lock) }
+        #endif
         pendingSettings = settings
         hasPending = true
-        os_unfair_lock_unlock(lock)
     }
 
     /// Fades in or out rather than cutting off.
     public func setPlaying(_ playing: Bool) {
+        #if canImport(os)
         os_unfair_lock_lock(lock)
+        defer { os_unfair_lock_unlock(lock) }
+        #endif
         pendingPlaying = playing
         hasPending = true
-        os_unfair_lock_unlock(lock)
     }
 
     public func render(left: UnsafeMutablePointer<Float>, right: UnsafeMutablePointer<Float>, frameCount: Int) {
         // If the main thread holds the lock right now, keep the previous
         // settings for this buffer instead of blocking the audio thread.
+        #if canImport(os)
         if os_unfair_lock_trylock(lock) {
-            if hasPending {
-                core.pointee.settings = pendingSettings
-                core.pointee.playing = pendingPlaying
-                hasPending = false
-            }
+            applyPending()
             os_unfair_lock_unlock(lock)
         }
+        #else
+        applyPending()
+        #endif
         core.pointee.render(left: left, right: right, frameCount: frameCount)
+    }
+
+    private func applyPending() {
+        if hasPending {
+            core.pointee.settings = pendingSettings
+            core.pointee.playing = pendingPlaying
+            hasPending = false
+        }
     }
 }
 

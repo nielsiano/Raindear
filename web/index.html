@@ -1,0 +1,103 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Raindear Web</title>
+<link rel="icon" href="data:,">
+<style>
+    :root { color-scheme: light dark; --bg: #f4f5f7; --fg: #1d2330; --muted: #677085; --accent: #3b6fd8; }
+    @media (prefers-color-scheme: dark) { :root { --bg: #12151c; --fg: #e4e8f0; --muted: #8a93a6; --accent: #7aa2f7; } }
+    body { margin: 0; min-height: 100vh; display: grid; place-items: center; background: var(--bg); color: var(--fg); font: 16px/1.5 system-ui, sans-serif; }
+    main { width: min(320px, calc(100% - 32px)); display: grid; gap: 16px; }
+    h1 { margin: 0; font-size: 20px; }
+    p { margin: 0; color: var(--muted); font-size: 14px; }
+    button { padding: 10px 16px; font: inherit; border: 0; border-radius: 8px; background: var(--accent); color: var(--bg); cursor: pointer; }
+    label { display: grid; gap: 4px; font-size: 14px; color: var(--muted); }
+    select { font: inherit; padding: 6px; border-radius: 6px; }
+    input[type=range] { width: 100%; accent-color: var(--accent); }
+</style>
+</head>
+<body>
+<main>
+    <h1>Raindear Web</h1>
+    <p>RainSynth from Raindear, Embedded Swift compiled to WebAssembly, running in an AudioWorklet.</p>
+    <button id="toggle">Play</button>
+    <label>Volume <input id="volume" type="range" min="0" max="1" step="0.01" value="0.6"></label>
+    <label>Preset <select id="preset"></select></label>
+    <div id="sliders" style="display: grid; gap: 12px"></div>
+    <p id="status"></p>
+</main>
+<script type="module">
+    // RainPreset.all from RainSettings.swift: rain, drops, rumble, tone, wind, thunder
+    const presets = {
+        'Drizzle': [0.3, 0.22, 0.05, 0.5, 0.05, 0],
+        'Steady rain': [0.55, 0.4, 0.15, 0.35, 0.1, 0],
+        'Downpour': [0.9, 0.55, 0.55, 0.42, 0.3, 0],
+        'Rain on a roof': [0.6, 0.7, 0.7, 0.3, 0.05, 0],
+        'Behind a window': [0.5, 0.15, 0.35, 0.1, 0.15, 0],
+        'Thunderstorm': [0.5, 0.35, 0.25, 0.4, 0.45, 0.7],
+    };
+    const names = ['Rain', 'Drops', 'Rumble', 'Tone', 'Wind', 'Thunder'];
+    const toggle = document.getElementById('toggle');
+    const volume = document.getElementById('volume');
+    const status = document.getElementById('status');
+    const preset = document.getElementById('preset');
+
+    const sliders = names.map(name => {
+        const label = document.createElement('label');
+        const input = document.createElement('input');
+        Object.assign(input, { type: 'range', min: 0, max: 1, step: 0.01 });
+        label.append(name, input);
+        document.getElementById('sliders').append(label);
+        return input;
+    });
+    for (const name of [...Object.keys(presets), 'Custom']) preset.add(new Option(name, name));
+
+    const values = () => sliders.map(slider => Number(slider.value));
+    const settings = () => [Number(volume.value), ...values()];
+    const send = () => node?.port.postMessage({ type: 'settings', values: settings() });
+
+    function choose(name) {
+        presets[name].forEach((value, i) => sliders[i].value = value);
+        preset.value = name;
+    }
+    choose('Rain on a roof');
+
+    preset.addEventListener('change', () => { if (preset.value !== 'Custom') { choose(preset.value); send(); } });
+    for (const slider of sliders) slider.addEventListener('input', () => {
+        const match = Object.entries(presets).find(([, v]) => v.every((x, i) => Math.abs(x - values()[i]) < 0.005));
+        preset.value = match ? match[0] : 'Custom';
+        send();
+    });
+
+    let context, node, playing = false;
+
+    async function start() {
+        context = new AudioContext({ latencyHint: 'playback' });
+        const [module] = await Promise.all([
+            WebAssembly.compileStreaming(fetch('rain.wasm')),
+            context.audioWorklet.addModule('rain-worklet.js'),
+        ]);
+        const [seedLow, seedHigh] = crypto.getRandomValues(new Uint32Array(2));
+        node = new AudioWorkletNode(context, 'rain', {
+            numberOfInputs: 0,
+            outputChannelCount: [2],
+            processorOptions: { module, seedLow, seedHigh, settings: settings() },
+        });
+        node.connect(context.destination);
+        status.textContent = `${context.sampleRate} Hz`;
+    }
+
+    toggle.addEventListener('click', async () => {
+        if (!context) await start();
+        await context.resume();
+        playing = !playing;
+        node.port.postMessage({ type: 'playing', playing });
+        toggle.textContent = playing ? 'Stop' : 'Play';
+    });
+
+    volume.addEventListener('input', send);
+</script>
+</body>
+</html>

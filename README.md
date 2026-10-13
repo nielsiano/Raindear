@@ -62,12 +62,27 @@ swift run -c release rain-render --rain 0 --drops 0 --rumble 0 --wind 0 --thunde
 
 It prints the peak and RMS level. `make test` checks that every preset is audible, stays below full scale and fades to silence, and that thunder is clearly louder than the rain.
 
+## In the browser
+
+`RainSynth` also builds to WebAssembly with Embedded Swift: a 40 KB `rain.wasm` that needs no imports. `web/rain-worklet.js` runs it in an `AudioWorklet`, and `web/index.html` is a small player with the presets and sliders.
+
+```sh
+make wasm                                   # writes web/rain.wasm
+cd web && python3 -m http.server 8000       # then open http://localhost:8000
+```
+
+`make wasm` needs a swift.org toolchain with the matching Swift SDK for WebAssembly installed (Xcode's Swift cannot target wasm). See [Getting started with Swift SDKs for WebAssembly](https://www.swift.org/documentation/articles/wasm-getting-started.html). CI builds it on every push and attaches `rain.wasm` and `rain-worklet.js` to releases tagged `v*`.
+
+With the same seed and settings the output matches the native renderer sample for sample when both use the same math library. With Apple's libm, tiny rounding differences in `exp` and `pow` change which drops fall, so the two sound the same but are not the same recording.
+
 ## Layout
 
 ```
 Sources/Raindear      menu bar app (SwiftUI MenuBarExtra, AVAudioEngine)
 Sources/RainSynth     synthesis, settings and presets
 Sources/rain-render   offline renderer
+Sources/rain-wasm     WebAssembly exports (rain_create, rain_set_settings, rain_render, ...)
+web                   AudioWorklet and browser player
 Tests/RainSynthTests  level and behavior tests
 Support/Info.plist    app bundle metadata
 ```
